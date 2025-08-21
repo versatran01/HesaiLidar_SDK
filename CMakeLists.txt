@@ -31,3 +31,5 @@ else()
 
     target_link_libraries(multi_test hesai_sdk_lib)
 endif()
+
+add_subdirectory(play)
