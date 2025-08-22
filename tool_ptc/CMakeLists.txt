@@ -5,7 +5,7 @@
 cmake_minimum_required(VERSION 3.15)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 project(CommonModules)
 
 set(CMAKE_BUILD_TYPE ON)
@@ -46,10 +46,6 @@ if(WITH_PTCCLIENT)
     if(WITH_PTCS_USE)
         target_link_libraries(ptcClient_lib ${OPENSSL_LIBRARIES})
     endif(WITH_PTCS_USE)
-    set_target_properties(
-        ptcClient_lib
-        PROPERTIES CXX_STANDARD_REQUIRED TRUE CXX_STANDARD 14
-    )
     target_include_directories(
         ptcClient_lib
         PUBLIC
@@ -71,18 +67,10 @@ add_library(
     ../libhesai/Common/src/auto_tick_count.cc
 )
 target_link_libraries(platutils_lib log_lib)
-set_target_properties(
-    platutils_lib
-    PROPERTIES CXX_STANDARD_REQUIRED TRUE CXX_STANDARD 14
-)
 target_include_directories(platutils_lib PUBLIC ../libhesai/Common/include)
 # log lib
 add_library(log_lib ../libhesai/Logger/src/logger.cc)
 target_link_libraries(log_lib ${CMAKE_THREAD_LIBS_INIT})
-set_target_properties(
-    log_lib
-    PROPERTIES CXX_STANDARD_REQUIRED TRUE CXX_STANDARD 14
-)
 target_include_directories(log_lib PUBLIC ../libhesai/Logger/include)
 
 add_executable(ptc_upgrade ptc_upgrade.cc)

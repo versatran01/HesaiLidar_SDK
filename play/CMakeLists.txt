@@ -3,4 +3,4 @@ find_package(glog REQUIRED)
 find_package(absl REQUIRED)
 
 add_executable(play main.cpp)
-target_link_libraries(play PUBLIC hesai_sdk_lib fmt::fmt glog::glog)
+target_link_libraries(play PUBLIC lidar_lib fmt::fmt glog::glog)
