@@ -1,0 +1,9 @@
+BasedOnStyle: Google
+Standard: Cpp11
+# column 100
+ColumnLimit: 100
+BinPackArguments: false
+BinPackParameters: false
+PointerAlignment: Left
+DerivePointerAlignment: false
+CommentPragmas: NOLINT.*
