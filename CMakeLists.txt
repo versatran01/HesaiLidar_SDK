@@ -11,9 +11,9 @@ set(CMAKE_BUILD_TYPE Release)
 
 add_subdirectory(libhesai)
 
-# add_library(hesai_sdk_lib driver/hesai_lidar_sdk.cc)
-# target_link_libraries(hesai_sdk_lib PUBLIC lidar_lib ${OTHER_LIB})
-# target_include_directories(hesai_sdk_lib PUBLIC ${OTHER_INCLUDE_DIRS} driver ./)
+add_library(hesai_sdk_lib driver/hesai_lidar_sdk.cc)
+target_link_libraries(hesai_sdk_lib PUBLIC lidar_lib ${OTHER_LIB})
+target_include_directories(hesai_sdk_lib PUBLIC ${OTHER_INCLUDE_DIRS} driver ./)
 
 # if(DISENABLE_TEST_CC)
 # else()
@@ -26,10 +26,10 @@ add_subdirectory(libhesai)
 #     target_link_libraries(multi_test hesai_sdk_lib)
 # endif()
 
-
 find_package(fmt REQUIRED)
 find_package(glog REQUIRED)
 find_package(absl REQUIRED)
+find_package(CLI11 REQUIRED)
 
 add_executable(play main.cpp)
-target_link_libraries(play PUBLIC lidar_lib fmt::fmt glog::glog)
+target_link_libraries(play PUBLIC lidar_lib fmt::fmt glog::glog CLI11::CLI11)
