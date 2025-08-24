@@ -1,5 +1,9 @@
 #include <fmt/format.h>
 #include <glog/logging.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/register_point_struct.h>
 
 #include <CLI/CLI.hpp>
 #include <algorithm>
@@ -9,13 +13,34 @@
 
 #include "driver_param.h"
 #include "inner_com.h"
-#include "lidar.h"
 #include "lidar_types.h"
 #include "udp_parser.h"
-#include "udp_protocol_p40.h"
 
 namespace fs = std::filesystem;
 namespace hl = hesai::lidar;
+
+struct PointHesaiLidar {
+  PCL_ADD_POINT4D;  // Adds x, y, z, and a float for padding
+  union EIGEN_ALIGN16 {
+    struct {
+      uint8_t refl;   // 1b
+      uint8_t conf;   // 1b
+      uint16_t ring;  // 2b
+      uint16_t fire;  // 2b
+    };
+  };
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW  // Ensure correct memory alignment
+};
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(PointHesaiLidar,
+                                  (float, x, x)           //
+                                  (float, y, y)           //
+                                  (float, z, z)           //
+                                  (uint8_t, refl, refl)   //
+                                  (uint8_t, conf, conf)   //
+                                  (uint16_t, ring, ring)  //
+                                  (uint16_t, fire, fire)  //
+)
 
 std::vector<char> ReadBinFile(const fs::path& file) {
   std::ifstream ifs(file, std::ios::binary);
@@ -71,9 +96,11 @@ int main(int argc, char** argv) {
   CHECK(parser.isSetFiretimeSucc());
 
   std::vector<hl::FunctionSafety> func_safety;
-  std::vector<PacketDecodeData> decode_data;
+  std::vector<hl::PacketDecodeData> decode_data;
 
-  bool first_frame = false;
+  bool got_first_frame = false;
+
+  pcl::PointCloud<PointHesaiLidar> cloud;
 
   int i = 0;
   for (const auto& bin_file : bin_files) {
@@ -84,10 +111,41 @@ int main(int argc, char** argv) {
     // LOG(INFO) << fmt::format("Processing file: {}", bin_file.stem().string());
     const auto packet = GetPacket(data);
     CHECK_EQ(parser.DecodePacket(frame, packet), 0);
-    LOG_IF(INFO, frame.scan_complete) << "Scan complete";
+    // If frame complete, then we will not increment packet_num, instead, we should decode this
+    // packet in the new frame.
+    // LOG(INFO) << fmt::format("after decode packet index: {}", frame.packet_num);
+    CHECK_GT(frame.packet_num, 0);
+    CHECK_EQ(parser.ComputeXYZI(frame, frame.packet_num - 1), 0);
 
     if (frame.scan_complete) {
-      LOG(INFO) << "First frame complete, packets: " << frame.packet_num;
+      LOG(INFO) << fmt::format("Frame {} complete {} packets, points_num: {}",
+                               frame.frame_index,
+                               frame.packet_num,
+                               frame.points_num);
+
+      cloud.clear();
+      cloud.reserve(230400);
+
+      if (got_first_frame) {
+        for (int i = 0; i < frame.packet_num; ++i) {
+          for (int j = 0; j < frame.valid_points[i]; ++j) {
+            const auto k = i * frame.per_points_num + j;
+            const auto& pt = frame.points[k];
+
+            PointHesaiLidar p;
+            p.x = pt.x;
+            p.y = pt.y;
+            p.z = pt.z;
+            p.refl = pt.intensity;
+            p.conf = pt.confidence;
+            p.ring = pt.ring;
+            cloud.push_back(p);
+          }
+        }
+
+        pcl::io::savePCDFile(fs::path(output_dir) / fmt::format("cloud_{}.pcd", frame.frame_index),
+                             cloud);
+      }
 
       int num = 0;
       for (int i = 0; i < frame.packet_num; i++) {
@@ -97,14 +155,14 @@ int main(int argc, char** argv) {
       frame.Update();
 
       parser.DecodePacket(frame, packet);
+      // LOG(INFO) << fmt::format("New frame packet index: {}", frame.packet_num);
+      CHECK_GT(frame.packet_num, 0);
+      CHECK_EQ(parser.ComputeXYZI(frame, frame.packet_num - 1), 0);
 
-      if (first_frame == false) {
-        first_frame = true;
+      if (got_first_frame == false) {
+        got_first_frame = true;
         continue;
       }
-
-      // if the packet which contains split frame msgs is valid, it will be
-      // the first packet of new frame
     }
 
     // const auto* header =

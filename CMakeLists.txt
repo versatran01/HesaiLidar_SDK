@@ -27,9 +27,13 @@ target_include_directories(hesai_sdk_lib PUBLIC ${OTHER_INCLUDE_DIRS} driver ./)
 # endif()
 
 find_package(fmt REQUIRED)
+find_package(PCL REQUIRED)
 find_package(glog REQUIRED)
 find_package(absl REQUIRED)
 find_package(CLI11 REQUIRED)
 
 add_executable(play main.cpp)
-target_link_libraries(play PUBLIC lidar_lib fmt::fmt glog::glog CLI11::CLI11)
+target_link_libraries(
+    play
+    PUBLIC lidar_lib fmt::fmt glog::glog CLI11::CLI11 ${PCL_LIBRARIES}
+)
