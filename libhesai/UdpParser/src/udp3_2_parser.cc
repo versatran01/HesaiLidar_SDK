@@ -386,18 +386,22 @@ int Udp3_2Parser<T_Point>::DecodePacket(LidarDecodedFrame<T_Point> &frame, const
     }
     block_ns_offset = QT128C2X::QT128C2X_BLOCK_NS_OFFSET1 + QT128C2X::PandarQT_BLOCK_NS_OFFSET2 * int(blockid / (frame.return_mode < RETURN_MODE_MULTI ? 1 : 2));
     int loopIndex = (pTail->GetModeFlag() + (blockid / ((pTail->GetReturnMode() < 0x39) ? 1 : 2)) + 1) % 2;
+    // This part is useless
     if((isSelfDefine && channel_config_.isObtained)){
       loopIndex = (pTail->GetModeFlag() + (blockid / ((pTail->GetReturnMode() < 0x39) ? 1 : 2)) + 1) % channel_config_.loopNum;
     }
+    // std::cout << "block: " << blockid << ", loopIndex: " << loopIndex << std::endl;
     pAzimuth =
       reinterpret_cast<const HS_LIDAR_BODY_AZIMUTH_QT_V2 *>(
           (const unsigned char *)pHeader + sizeof(HS_LIDAR_HEADER_QT_V2) + 
           (sizeof(HS_LIDAR_BODY_AZIMUTH_QT_V2) + unitSize * 
           pHeader->GetLaserNum()) * blockid);
     u16Azimuth = pAzimuth->GetAzimuth();
+    // std::cout << "block id: "  << blockid << ", azimuth: " << u16Azimuth << std::endl;
     for (int i = 0; i < pHeader->GetLaserNum(); i++) {
       int channel = (isSelfDefine && channel_config_.isObtained && i < channel_config_.laser_num) 
                       ? channel_config_.channelConfigTable[loopIndex][i] - 1 : i;
+      // std::cout << "i: " << i << ", ch: " << channel << std::endl;
       if (this->correction.display[channel] == false) {
         continue;
       }

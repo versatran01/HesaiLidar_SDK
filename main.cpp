@@ -1,3 +1,4 @@
+#include <absl/types/span.h>
 #include <fmt/format.h>
 #include <glog/logging.h>
 #include <pcl/io/pcd_io.h>
@@ -8,6 +9,7 @@
 #include <CLI/CLI.hpp>
 #include <algorithm>
 #include <filesystem>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -25,6 +27,8 @@ struct PointHesaiLidar {
     struct {
       uint8_t refl;   // 1b
       uint8_t conf;   // 1b
+      uint8_t retr;   // 1b
+      uint8_t loop;   // 1b
       uint16_t ring;  // 2b
       uint16_t fire;  // 2b
     };
@@ -38,9 +42,118 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(PointHesaiLidar,
                                   (float, z, z)           //
                                   (uint8_t, refl, refl)   //
                                   (uint8_t, conf, conf)   //
+                                  (uint8_t, retr, retr)   //
+                                  (uint8_t, loop, loop)   //
                                   (uint16_t, ring, ring)  //
                                   (uint16_t, fire, fire)  //
 )
+
+hl::UdpPacket GetPacket(absl::Span<const char> data) {
+  return hl::UdpPacket((const uint8_t*)data.data(), data.size(), 0);
+}
+
+class HesaiQT128Parser {
+ public:
+  using HesaiPoint = hesai::lidar::LidarPointXYZICRTT;
+
+  explicit HesaiQT128Parser(bool organized = true)
+      : organized_(organized), udp_parser_("QT128C2X") {
+    udp_parser_.setFrameRightMemorySpace(frame_);
+    udp_parser_.SetPcapPlay(DATA_FROM_PCAP);
+    udp_parser_.SetFrameAzimuth(0);
+  }
+
+  void LoadCorrectionFile(const std::string& file) {
+    udp_parser_.LoadCorrectionFile(file);
+    CHECK_EQ(udp_parser_.isSetCorrectionSucc(), true);
+  }
+  void LoadFiretimesFile(const std::string& file) {
+    udp_parser_.LoadFiretimesFile(file);
+    CHECK_EQ(udp_parser_.isSetFiretimeSucc(), true);
+  }
+
+  void DecodePacket(absl::Span<const char> data) {
+    // Prev packet is not empty, decode it first
+    if (!prev_data_.empty()) {
+      // This indicates we are at the start of a frame, update the frame
+      frame_.Update();
+
+      // Decode previous data
+      const auto packet = GetPacket(prev_data_);
+      udp_parser_.DecodePacket(frame_, packet);
+      udp_parser_.ComputeXYZI(frame_, frame_.packet_num - 1);
+
+      prev_data_.clear();
+      // Unset frame complete
+      frame_complete_ = false;
+    }
+
+    // Then decode current data
+    const auto packet = GetPacket(data);
+    udp_parser_.DecodePacket(frame_, packet);
+    udp_parser_.ComputeXYZI(frame_, frame_.packet_num - 1);
+
+    if (frame_.scan_complete) {
+      // We need to save the current packet to prev_data_
+      prev_data_.assign(data.begin(), data.end());
+
+      if (got_first_frame_) {
+        frame_complete_ = true;
+        // Do some stuff with the cloud
+
+        cloud_.clear();
+        for (int i = 0; i < frame_.packet_num; ++i) {
+          for (int j = 0; j < frame_.valid_points[i]; ++j) {
+            const int ch = j % frame_.laser_num;
+
+            const auto k = i * frame_.per_points_num + j;
+            const auto& pt = frame_.points[k];
+            const auto& pd = frame_.pointData[k];
+            CHECK_EQ(pt.ring, ch);
+
+            if (pd.data.dQT.loopIndex == 0) {
+              // Skip
+              if (pt.ring < 32) {
+                continue;
+              }
+            } else {
+              if (32 <= pt.ring && pt.ring < 64) {
+                continue;
+              }
+            }
+
+            PointHesaiLidar p;
+            p.x = pt.x;
+            p.y = pt.y;
+            p.z = pt.z;
+            p.refl = pt.intensity;
+            p.conf = pt.confidence;
+            p.retr = j < frame_.laser_num ? 1 : 2;
+            p.loop = pd.data.dQT.loopIndex;
+            p.ring = pt.ring;
+            p.fire = i;
+            cloud_.push_back(p);
+          }
+        }
+      } else {
+        got_first_frame_ = true;
+      }
+    }
+  }
+
+  bool frame_complete() const { return frame_complete_; }
+
+  const auto& cloud() const { return cloud_; }
+
+ private:
+  bool organized_{true};  // output organized point cloud
+  bool frame_complete_{false};
+  bool got_first_frame_{false};
+  pcl::PointCloud<PointHesaiLidar> cloud_;
+  std::vector<char> prev_data_;  // previous packet data
+  hesai::lidar::UdpParser<HesaiPoint> udp_parser_;
+  hesai::lidar::LidarDecodedFrame<HesaiPoint> frame_;
+};
 
 std::vector<char> ReadBinFile(const fs::path& file) {
   std::ifstream ifs(file, std::ios::binary);
@@ -50,12 +163,8 @@ std::vector<char> ReadBinFile(const fs::path& file) {
   return data;
 }
 
-hl::UdpPacket GetPacket(const std::vector<char>& data) {
-  return hl::UdpPacket((const uint8_t*)data.data(), data.size(), 0);
-}
-
 int main(int argc, char** argv) {
-  CLI::App app{"Hsai Binary to PCD Converter"};
+  CLI::App app{"Hesai Binary to PCD Converter"};
   argv = app.ensure_utf8(argv);
 
   std::string input_dir;
@@ -80,158 +189,24 @@ int main(int argc, char** argv) {
                [](const fs::path& p) { return p.extension() == ".bin"; });
   LOG(INFO) << "Number of packets: " << bin_files.size();
 
-  using PointT = hl::LidarPointXYZICRTT;
-
-  hl::UdpParser<PointT> parser("QT128C2X");
-  LOG(INFO) << parser.GetLidarType();
-  hl::LidarDecodedFrame<PointT> frame;
-
-  parser.setFrameRightMemorySpace(frame);
-  parser.SetPcapPlay(DATA_FROM_PCAP);
-  parser.SetFrameAzimuth(0);
-
-  parser.LoadCorrectionFile(fs::path(input_dir) / "QT128C2X_angle.csv");
-  CHECK(parser.isSetCorrectionSucc());
-  parser.LoadFiretimesFile(fs::path(input_dir) / "QT128C2X_firetime.csv");
-  CHECK(parser.isSetFiretimeSucc());
-
-  std::vector<hl::FunctionSafety> func_safety;
-  std::vector<hl::PacketDecodeData> decode_data;
-
-  bool got_first_frame = false;
-
-  pcl::PointCloud<PointHesaiLidar> cloud;
+  HesaiQT128Parser qt128_parser;
+  qt128_parser.LoadCorrectionFile(fs::path(input_dir) / "QT128C2X_angle.csv");
+  qt128_parser.LoadFiretimesFile(fs::path(input_dir) / "QT128C2X_firetime.csv");
 
   int i = 0;
+  int frame_id = 0;
   for (const auto& bin_file : bin_files) {
     i += 1;
+
     const auto data = ReadBinFile(bin_file);
+    qt128_parser.DecodePacket(data);
 
-    // Get the stem of the file
-    // LOG(INFO) << fmt::format("Processing file: {}", bin_file.stem().string());
-    const auto packet = GetPacket(data);
-    CHECK_EQ(parser.DecodePacket(frame, packet), 0);
-    // If frame complete, then we will not increment packet_num, instead, we should decode this
-    // packet in the new frame.
-    // LOG(INFO) << fmt::format("after decode packet index: {}", frame.packet_num);
-    CHECK_GT(frame.packet_num, 0);
-    CHECK_EQ(parser.ComputeXYZI(frame, frame.packet_num - 1), 0);
-
-    if (frame.scan_complete) {
-      LOG(INFO) << fmt::format("Frame {} complete {} packets, points_num: {}",
-                               frame.frame_index,
-                               frame.packet_num,
-                               frame.points_num);
-
-      cloud.clear();
-      cloud.reserve(230400);
-
-      if (got_first_frame) {
-        for (int i = 0; i < frame.packet_num; ++i) {
-          for (int j = 0; j < frame.valid_points[i]; ++j) {
-            const auto k = i * frame.per_points_num + j;
-            const auto& pt = frame.points[k];
-
-            PointHesaiLidar p;
-            p.x = pt.x;
-            p.y = pt.y;
-            p.z = pt.z;
-            p.refl = pt.intensity;
-            p.conf = pt.confidence;
-            p.ring = pt.ring;
-            cloud.push_back(p);
-          }
-        }
-
-        pcl::io::savePCDFile(fs::path(output_dir) / fmt::format("cloud_{}.pcd", frame.frame_index),
-                             cloud);
-      }
-
-      int num = 0;
-      for (int i = 0; i < frame.packet_num; i++) {
-        num += frame.valid_points[i];
-      }
-      LOG(INFO) << fmt::format("valid points: {}", num);
-      frame.Update();
-
-      parser.DecodePacket(frame, packet);
-      // LOG(INFO) << fmt::format("New frame packet index: {}", frame.packet_num);
-      CHECK_GT(frame.packet_num, 0);
-      CHECK_EQ(parser.ComputeXYZI(frame, frame.packet_num - 1), 0);
-
-      if (got_first_frame == false) {
-        got_first_frame = true;
-        continue;
-      }
+    if (qt128_parser.frame_complete()) {
+      LOG(INFO) << "Frame: " << frame_id;
+      pcl::io::savePCDFile(fs::path(output_dir) / fmt::format("cloud_{}.pcd", frame_id),
+                           qt128_parser.cloud());
+      frame_id++;
     }
-
-    // const auto* header =
-    //     reinterpret_cast<const HS_LIDAR_HEADER_QT_V2*>(data.data() +
-    //     sizeof(HS_LIDAR_PRE_HEADER));
-    // const int unitSize = header->unitSize();
-
-    // if (hl::hasFunctionSafety(header->m_u8Status)) {
-    //   const auto* pfs = reinterpret_cast<const HS_LIDAR_FUNCTION_SAFETY*>(
-    //       (const unsigned char*)header + sizeof(HS_LIDAR_HEADER_QT_V2) +
-    //       (sizeof(HS_LIDAR_BODY_AZIMUTH_QT_V2) + unitSize * header->GetLaserNum()) *
-    //           header->GetBlockNum() +
-    //       sizeof(HS_LIDAR_BODY_CRC_QT_V2));
-
-    // const auto lidar_state = pfs->GetLidarState();
-
-    //   hl::FunctionSafety fs;
-    //   fs.is_valid = true;
-    //   fs.fs_version = pfs->m_u8Version;  // 1
-    //   fs.status = pfs->m_u8Status;
-    //   fs.fault_info = pfs->m_u8FaultInfo;   //
-    //   fs.fault_code = pfs->GetFaultCode();  // 0 is no fault
-    //   LOG_IF(INFO, false) << fmt::format(
-    //       "Lidar state: {}, FS version: {}, status: {}, fault info: {}, fault code: {}",
-    //       lidar_state,  // 1 is normal
-    //       fs.fs_version,
-    //       fs.status,
-    //       fs.fault_info,
-    //       fs.fault_code);
-    // }
-
-    // const auto* tail = reinterpret_cast<const HS_LIDAR_TAIL_QT_V2*>(
-    //     (const unsigned char*)header + sizeof(HS_LIDAR_HEADER_QT_V2) +
-    //     (sizeof(HS_LIDAR_BODY_AZIMUTH_QT_V2) + unitSize * header->GetLaserNum()) *
-    //         header->GetBlockNum() +
-    //     sizeof(HS_LIDAR_BODY_CRC_QT_V2) +
-    //     (hasFunctionSafety(header->m_u8Status) ? sizeof(HS_LIDAR_FUNCTION_SAFETY) : 0));
-
-    // if (hl::hasSeqNum(header->m_u8Status)) {
-    //   const auto* tail_seq_num = reinterpret_cast<const HS_LIDAR_TAIL_SEQ_NUM_QT_V2*>(
-    //       (const unsigned char*)tail + sizeof(HS_LIDAR_TAIL_QT_V2));
-    //   LOG_IF(INFO, false) << fmt::format("Seq num: {}", tail_seq_num->GetSeqNum());
-    // }
-
-    // const auto spin_speed = tail->GetMotorSpeed();      // 600 fpm
-    // const auto return_mode = tail->GetReturnMode();     // 0x3B first, last return, default
-    // const auto block_num = header->GetBlockNum();       // 2
-    // const auto laser_num = header->GetLaserNum();       // 128
-    // const auto per_points_num = block_num * laser_num;  // 256
-    // const auto distance_unit = header->GetDistUnit();   // 0.004 or 4mm
-    // LOG(INFO) << fmt::format(
-    //     "spin_speed: {}, return_mode: {:x}, block_num: {}, laser_num: {}, per_points_num: {}, "
-    //     "dist_unit: {}",
-    //     spin_speed,
-    //     return_mode,
-    //     block_num,
-    //     laser_num,
-    //     per_points_num,
-    //     distance_unit);
-
-    // LOG(INFO) << fmt::format(
-    //     "per_points_num: {}, max_points_per_packet: {}", per_points_num,
-    //     frame.maxPointPerPacket);
-
-    // const auto time = tail->GetMicroLidarTimeU64(parser);
-
-    // const auto* azimuth = reinterpret_cast<const HS_LIDAR_BODY_AZIMUTH_QT_V2*>(
-    //     (const unsigned char*)header + sizeof(HS_LIDAR_HEADER_QT_V2));
-    // const auto u16Azimuth = azimuth->GetAzimuth();
 
     if (i > num_files) {
       break;
