@@ -25,27 +25,29 @@ struct PointHesaiLidar {
   PCL_ADD_POINT4D;  // Adds x, y, z, and a float for padding
   union EIGEN_ALIGN16 {
     struct {
-      uint8_t refl;   // 1b
-      uint8_t conf;   // 1b
-      uint8_t retr;   // 1b
-      uint8_t loop;   // 1b
-      uint16_t ring;  // 2b
-      uint16_t fire;  // 2b
+      uint8_t refl;           // 1b
+      uint8_t conf;           // 1b
+      uint8_t retr;           // 1b
+      uint8_t loop;           // 1b
+      uint16_t ring;          // 2b
+      uint16_t fire;          // 2b
+      uint32_t utime_offset;  // 4b
     };
   };
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW  // Ensure correct memory alignment
 };
 
 POINT_CLOUD_REGISTER_POINT_STRUCT(PointHesaiLidar,
-                                  (float, x, x)           //
-                                  (float, y, y)           //
-                                  (float, z, z)           //
-                                  (uint8_t, refl, refl)   //
-                                  (uint8_t, conf, conf)   //
-                                  (uint8_t, retr, retr)   //
-                                  (uint8_t, loop, loop)   //
-                                  (uint16_t, ring, ring)  //
-                                  (uint16_t, fire, fire)  //
+                                  (float, x, x)                           //
+                                  (float, y, y)                           //
+                                  (float, z, z)                           //
+                                  (uint8_t, refl, refl)                   //
+                                  (uint8_t, conf, conf)                   //
+                                  (uint8_t, retr, retr)                   //
+                                  (uint8_t, loop, loop)                   //
+                                  (uint16_t, ring, ring)                  //
+                                  (uint16_t, fire, fire)                  //
+                                  (uint32_t, utime_offset, utime_offset)  //
 )
 
 hl::UdpPacket GetPacket(absl::Span<const char> data) {
@@ -101,6 +103,8 @@ class HesaiQT128Parser {
         frame_complete_ = true;
         // Do some stuff with the cloud
 
+        const auto start_utime = frame_.packetData[0].t.sensor_timestamp;
+
         cloud_.clear();
         for (int i = 0; i < frame_.packet_num; ++i) {
           for (int j = 0; j < frame_.valid_points[i]; ++j) {
@@ -132,6 +136,10 @@ class HesaiQT128Parser {
             p.loop = pd.data.dQT.loopIndex;
             p.ring = pt.ring;
             p.fire = i;
+            const int64_t utime_offset =
+                (pt.timeSecond * 1e9 + pt.timeNanosecond) / 1e3 - start_utime;
+            CHECK_GE(utime_offset, 0);
+            p.utime_offset = static_cast<uint32_t>(utime_offset);
             cloud_.push_back(p);
           }
         }
